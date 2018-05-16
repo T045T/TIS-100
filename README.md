@@ -1,2 +1,163 @@
 # TIS-100
-An attempt to re-create the TIS-100 Tessellated Intelligence System (as faithfully as possible) in VHDL
+An attempt to re-create the [TIS-100 Tessellated Intelligence System](http://www.zachtronics.com/tis-100/) (as faithfully as possible) in VHDL
+
+The end goal is to create a template for [PYNQ](https://github.com/Xilinx/PYNQ) [Overlays](http://pynq.readthedocs.io/en/v2.1/pynq_overlays.html) that can execute programs that would work in the game and reach the same results.
+
+This requires four main things:
+
+1. VHDL models of the different T** nodes described in the TIS-100 Manual and the overall system (clock distribution, memory buses, etc.)
+2. Some sort of Architecture Description Language (ADL) to make it easy to compose them into clusters that resemble the ones in the game
+3. An "assembler" that takes the language accepted by the game and transforms it into actual instructions, ready to transfer to the FPGA
+4. An Overlay package that wraps all this up nicely and allows users to run their own code on their very own, real-world TIS-100
+
+## System Design
+
+The overall system parameters define the framework for the individual nodes' functionality and inform things like the width and design of data connections and internal buses.
+
+We'll go through a few aspects of that system design, using the **T21 Basic Execution Node** as a reference.
+All other available nodes (with the exception of the Visualization Module) are all much simpler and can be thought of as variations of this one.
+
+### Clock
+All the nodes in a TIS-100 follow the same clock. For easy debugging, its speed is adjustable, from *stopped* to, uh... *fast*.
+Nothing to worry about here - maybe we can use SW1 and SW0 on the PYNQ board to select a speed, and one of the push buttons to step (we should probably also enable stepping via the Overlay driver, so we can do it from Python).
+
+### Arithmetic Range
+Next, let's see how many bits we need!
+
+All data on the TIS-100 is numeric in nature.
+To be precise, every peace of data is an integer in the interval [-999, 999].
+That's 1998 numbers in total, so the nearest power of 2 is 2^11 = 2048.
+That means we need to use 11 bits to represent our numbers, since you can represent 2^(n) numbers using n bits.
+
+Conveniently, that leaves 50 numbers we cannot use for math, which comes in useful when designing the ISA.
+Let's do what all the cool kids do and use [two's complement](https://en.wikipedia.org/wiki/Two%27s_complement) for negative numbers.
+With that decided, let's look at the minimum and maximum numbers our system can use in 11-bit binary:
+
+```
+ 999: 01111100111
+-999: 10000011001
+```
+
+> **Note:** The addition and subtraction operations do not overflow, but saturate at the interval limits.
+> We'll need to keep this in mind when designing the ALU!
+
+Due to the way two's complement numbers work, this means we can nab the block in between those two for our own sordid purposes.
+Since there aren't that many special values, I'll just take the block from `10000000000` to `10000010000` - easy to recognize, and 16 "special" numbers are more than we need!
+
+### Registers & Ports
+Now, what special numbers might we need?
+The first thing that comes to mind are the ACC and NIL registers of the T21 node.
+They can be used in the place of literal numbers with any instruction, so we need a way to encode them.
+(NIL is special, but for now, let's treat it like a register)
+
+There's also the four Ports (plus two "Pseudo-Ports") that every T21 node has:
+
+* UP
+* DOWN
+* LEFT
+* RIGHT
+
+* ANY
+* LAST
+
+That gets us up to 8 registers (and register-y things) total.
+Yay!
+We have half of our special numbers left!
+
+Anyhow...
+Each port is a synchronous (with some exceptions, depending on the node), bidirectional (again, with exceptions) data connection between two end points.
+So of course, each one needs 11 data wires (one for each bit, duh).
+
+But what else?
+
+To get a definitive answer, we also need to consider the "Pseudo-Ports", LAST and ANY.
+
+ANY writes to whatever port first indicates it wants to read, or reads from whichever port receives data first.
+LAST works together with ANY, but is pretty easy:
+It just means "the last thing ANY picked", so we need to save that in a special, hidden 2-bit (there's only four options) register.
+(The manual specifies that the behavior of LAST with no preceding ANY is undefined, so this is fine. But the reference implementation stalls when using LAST without ANY, so we may want to use another bit to show whether LAST has been initialized)
+
+Without spending too much time on premature optimization, let's add two extra wires to the Port interconnect: WRITE and READ.
+
+With those, ANY can just choose the port whose WRITE or READ wire is being pulled high by a neighbor.
+A quick experiment shows that in case of multiple ports receiving data in the same cycle, the order of precedence is
+
+**LEFT, RIGHT, UP, DOWN**
+
+for reading, and
+
+**UP, LEFT, RIGHT, DOWN**
+
+for writing.
+
+The READ and WRITE wires are also used to determine whether to continue execution.
+Let's assume that we're able to do a read from or write to a port in one cycle - the manual says timing and performance may vary between hardware, but we'll stick to the reference implementation for the sake of simplicity.
+
+Let's look at an example:
+```
+           +---------------+       +-------+
+READ   +---+               +-------+       +
+
+                   +-------+       +-------+
+WRITE  +-----------+       +-------+       +
+
+           +---+   +---+   +---+   +---+
+CLOCK  +---+   +---+   +---+   +---+   +---+
+           T1      T2      T3      T4
+
+```
+
+1. At T1, one of the two nodes connected to this port pulls the READ line high.
+2. At T2, the second node writes a piece of data and pulls the WRITE line high.
+3. At T3, the reading node sees the high WRITE line and reads the data. It can then continue to the next instruction.
+   The writing node checks the READ line. It's high, so it knows the data has been read and continues.
+   So the next instructions (another read and write, this time both at the same time!) are executed at T4.
+
+Given that Port transfers wait for the other side to acknowledge (by pulling either READ or WRITE high), the process will deadlock whenever both sides of a Port try to read or write at the same time.
+The manual says that "a hardware fault will occur", but no such thing happens in the reference implementation.
+The two nodes will simply wait forever.
+
+Given that potential to deadlock, a RESET pin is crucial for the VHDL implementation!
+
+## ISA
+
+Unlike all the other nodes featured in the game, the T21 node is programmable.
+Luckily for us, the instruction set is very simple:
+There's only 13 instructions (we'll get to what they are later).
+
+That means we need 4 bits in our instruction word to encode the actual instruction.
+Let's see how much we need for the operands!
+
+Let's break it down into categories:
+
+### Moving Data
+
+* NOP
+
+  A bit of a cheat, I know. But I guess this moves no data to nowhere.
+  Easy!
+* MOV src: {literal, register, port, NIL}, dst: {register, port, NIL}
+
+  A bit more interesting!
+  We figured out earlier that our literals are 11 bits long, and that with those 11 bits, we can also encode the registers and ports.
+  But what about *dst*? Since we only have 8 special targets, we can get away with only using 3 bits for that!
+* SWP
+
+  This swaps ACC with the special register BAK - no operands, no problem!
+* SAV
+
+  This *copies* ACC into BAK - again, no operands!
+
+All the other instructions only take one parameter, so MOV was the longest instruction we have.
+How many bits does it need?
+
+```
+    4 bits for the operation
+   /
+  /    11 bits for the first operand (if any)
+ /    /           3 bits for the second operand (if any)
+/    /           /
+0000 00000000000 000
+
+18 bits total
+```
