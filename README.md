@@ -287,3 +287,20 @@ Behold!
 
 18 bits total
 ```
+
+## Loading a program
+
+The next question is:
+
+How do we even load a program into a T21 node?
+Let's go with a pretty easy way:
+
+> **Architecture Note:**
+>
+> Each T21 node has an 18-bit wide DATA port and DEN (data enable) pin.
+> If DEN is high, the values from DATA are written to program memory on rising clock edge.
+>
+> An internal counter increments after every clock cycle, and is reset when RESET is pulled high.
+
+This approach allows us to connect the DEN pins of all nodes to a multiplexer and their DATA ports to a single bus.
+Done.
