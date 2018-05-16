@@ -31,6 +31,11 @@ That means we need to use 11 bits to represent our numbers, since you can repres
 
 Conveniently, that leaves 50 numbers we cannot use for math, which comes in useful when designing the ISA.
 Let's do what all the cool kids do and use [two's complement](https://en.wikipedia.org/wiki/Two%27s_complement) for negative numbers.
+
+> **Architecture Note:**
+>
+> The TIS-100 System will use 11-bit signed (two's complement) integer numbers
+
 With that decided, let's look at the minimum and maximum numbers our system can use in 11-bit binary:
 
 ```
@@ -38,11 +43,17 @@ With that decided, let's look at the minimum and maximum numbers our system can 
 -999: 10000011001
 ```
 
-> **Note:** The addition and subtraction operations do not overflow, but saturate at the interval limits.
+> **Architecture Note:**
+>
+> The addition and subtraction operations do not overflow, but saturate at the interval limits.
 > We'll need to keep this in mind when designing the ALU!
 
 Due to the way two's complement numbers work, this means we can nab the block in between those two for our own sordid purposes.
 Since there aren't that many special values, I'll just take the block from `10000000000` to `10000010000` - easy to recognize, and 16 "special" numbers are more than we need!
+
+> **Architecture Note:**
+>
+> Registers and ports are numbered starting from `10000000000` when expressed as 11-bit numbers.
 
 ### Registers & Ports
 Now, what special numbers might we need?
@@ -78,6 +89,10 @@ It just means "the last thing ANY picked", so we need to save that in a special,
 (The manual specifies that the behavior of LAST with no preceding ANY is undefined, so this is fine. But the reference implementation stalls when using LAST without ANY, so we may want to use another bit to show whether LAST has been initialized)
 
 Without spending too much time on premature optimization, let's add two extra wires to the Port interconnect: WRITE and READ.
+
+> **Architecture Note:**
+>
+> The physical interface at a Port consists of 11 DATA wires, one READ and one WRITE wire.
 
 With those, ANY can just choose the port whose WRITE or READ wire is being pulled high by a neighbor.
 A quick experiment shows that in case of multiple ports receiving data in the same cycle, the order of precedence is
@@ -119,6 +134,10 @@ The two nodes will simply wait forever.
 
 Given that potential to deadlock, a RESET pin is crucial for the VHDL implementation!
 
+> **Architecture Note:**
+>
+> Each Node has a high-active RESET pin in addition to its CLOCK input and any Ports.
+
 ## ISA
 
 Unlike all the other nodes featured in the game, the T21 node is programmable.
@@ -132,25 +151,132 @@ Let's break it down into categories:
 
 ### Moving Data
 
-* NOP
+* *+NOP**
 
   A bit of a cheat, I know. But I guess this moves no data to nowhere.
   Easy!
-* MOV src: {literal, register, port, NIL}, dst: {register, port, NIL}
+* **MOV** src: {literal, port, ACC, NIL}, dst: {register, port, ACC, NIL}
 
   A bit more interesting!
   We figured out earlier that our literals are 11 bits long, and that with those 11 bits, we can also encode the registers and ports.
   But what about *dst*? Since we only have 8 special targets, we can get away with only using 3 bits for that!
-* SWP
+
+  When moving to ACC or NIL, this takes one cycle.
+  Writes to a Port block until the other side moves out of that port.
+  **Note:** A Port write will block for at least one cycle, even if another node is already waiting on the other side - you need to write to the Port *before* the other side can read!
+
+  *Reads* from a Port will block until data is available, but without the one cycle minimum that writes incur.
+* **SWP**
 
   This swaps ACC with the special register BAK - no operands, no problem!
-* SAV
+* **SAV**
 
   This *copies* ACC into BAK - again, no operands!
 
-All the other instructions only take one parameter, so MOV was the longest instruction we have.
-How many bits does it need?
 
+### Arithmetic
+
+* **ADD** src: {literal, port, ACC, NIL}
+
+  Add the operand to ACC.
+  Again, when reading from a Port, this may block.
+  ACC saturates at 999.
+
+* **SUB** src: {literal, port, ACC, NIL}
+
+  Subtract the operand from ACC (will block if reading from a Port).
+  ACC saturates at -999.
+
+* **NEG**
+
+  Negate the value in ACC (0 remains 0)
+
+
+### Jumps
+
+Jumps are going to be interesting, for two reasons that are intertwined:
+
+1. It's not possible to jump out of the program
+2. The length of the program has an upper bound, but can vary
+
+This means relative jumps (see **JRO** below) in particular need to be somewhat supervised.
+
+> **Architecture Note:**
+>
+> We need a way to figure out the length of the currently loaded program at run time.
+> See "Extra Instructions" below for ideas on how to do this.
+> We'll call that value *programLength*.
+
+Given the length of the program, we can now ensure that the PC is never less than 0 or more than *programLength*.
+
+* **JMP** target: literal
+  Jump to the specified address in the program, i.e. set the Program Counter (PC) to *target*.
+
+* **JEZ** target: literal
+  Jump to *target* if ACC is zero.
+
+* **JNZ** target: literal
+  Jump to *target* if ACC is *not* zero.
+
+* **JGZ** target: literal
+  Jump to *target* if ACC is strictly greater than zero.
+
+* **JLZ** target: literal
+  Jump to *target* if ACC is strictly less than zero.
+
+* **JRO** offset: literal
+  Jump to PC + *offset*.
+  If *offset* is zero, this will trap the machine in an infinite loop!
+
+  Note that this, too, is bounded at *programLength* and does **not** wrap, which means the program
+
+  ```
+  MOV 1 ACC
+  JRO ACC
+  ```
+
+  Is an infinite loop!
+
+  ACC is 1, the JRO instruction tries to jump ahead by 1, but since there is no instruction after JRO to jump to, it gets "stuck".
+
+
+### Extra Instructions
+
+This section is primarily dedicated to figuring out how to find the length of the current program.
+
+Two alternatives come to mind:
+
+* **LEN** programLength: literal
+
+  Must be the first instruction in any T21 program.
+  This tells the CPU how long the program is and thereby sets the upper bound for jumps.
+  Easier from a hardware perspective (read *programLength* into a register, then use it from there), but there's a few downsides:
+    1. The assembler now needs to count instructions, making it more complex
+    2. All programs are one instruction longer than their "original" TIS-100 equivalent.
+    3. How do we count the space the LEN instruction is at?
+       For programs to work as quickly as on a "real" T21, it would need to be "-1" and only
+       executed once after a reset.
+
+* **VOID**
+  Denotes unused program space.
+  Since the T21 has only 15 instructions' worth of program memory, it's feasible to detect how many of those are used by using a specialized memory matrix.
+
+  This is spectacularly wasteful in terms of hardware used vs. using a BRAM on an FPGA, but it avoids the issues with LEN above.
+
+  A VOID instruction must never be executed. If it is, the T21 will halt.
+  So, just as it would be the assembler's responsibility to calculate the correct length if we used the LEN instruction above, with VOID it would be the assembler's responsibility to ensure the program is contiguous in memory.
+
+  Then again, that's what it would have to do anyway.
+  No point in allowing the assembler to mix in illegal instructions, is there?
+
+
+### Instruction format
+
+For those not keeping track in their head:
+The longest instruction we have is MOV, with its two parameters - one literal/register/port (11 bits), one register/port (3 bits).
+
+So how many bits do we need in total?
+Behold!
 ```
     4 bits for the opcode
    /
