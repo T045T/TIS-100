@@ -15,7 +15,7 @@ This requires four main things:
 The overall system parameters define the framework for the individual nodes' functionality and inform things like the width and design of data connections and internal buses.
 
 We'll go through a few aspects of that system design, using the **T21 Basic Execution Node** as a reference.
-All other available nodes (with the exception of the Visualization Module) are all much simpler and can be thought of as variations of this one.
+All other available nodes (with the exception of the Visualization Module) are much simpler and can be thought of as variations of this one.
 
 ### Clock
 All the nodes in a TIS-100 follow the same clock. For easy debugging, its speed is adjustable, from *stopped* to, uh... *fast*.
@@ -27,14 +27,14 @@ Next, let's see how many bits we need!
 All data on the TIS-100 is numeric in nature.
 To be precise, every peace of data is an integer in the interval [-999, 999].
 That's 1998 numbers in total, so the nearest power of 2 is 2^11 = 2048.
-That means we need to use 11 bits to represent our numbers, since you can represent 2^(n) numbers using n bits.
+That means we need to use 11 bits to represent our numbers, since you can represent 2^n numbers using n bits.
 
 Conveniently, that leaves 50 numbers we cannot use for math, which comes in useful when designing the ISA.
 Let's do what all the cool kids do and use [two's complement](https://en.wikipedia.org/wiki/Two%27s_complement) for negative numbers.
 
 > **Architecture Note:**
 >
-> The TIS-100 System will use 11-bit signed (two's complement) integer numbers
+> The TIS-100 VHDL System will use 11-bit signed (two's complement) integer numbers
 
 With that decided, let's look at the minimum and maximum numbers our system can use in 11-bit binary:
 
@@ -151,7 +151,7 @@ Let's break it down into categories:
 
 ### Moving Data
 
-* *+NOP**
+* **NOP**
 
   A bit of a cheat, I know. But I guess this moves no data to nowhere.
   Easy!
