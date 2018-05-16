@@ -303,4 +303,5 @@ Let's go with a pretty easy way:
 > An internal counter increments after every clock cycle, and is reset when RESET is pulled high.
 
 This approach allows us to connect the DEN pins of all nodes to a multiplexer and their DATA ports to a single bus.
-Done.
+
+The interface to the outside world might then be shared memory, with some logic to deal with the resetting, read from the shared memory block and manage the node address (i.e. the input to the DEN mux), incrementing it after reading a VOID instruction or something.
