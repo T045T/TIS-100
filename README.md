@@ -125,7 +125,7 @@ Unlike all the other nodes featured in the game, the T21 node is programmable.
 Luckily for us, the instruction set is very simple:
 There's only 13 instructions (we'll get to what they are later).
 
-That means we need 4 bits in our instruction word to encode the actual instruction.
+That means we need 4 bits in our instruction word to encode the opcode.
 Let's see how much we need for the operands!
 
 Let's break it down into categories:
@@ -152,7 +152,7 @@ All the other instructions only take one parameter, so MOV was the longest instr
 How many bits does it need?
 
 ```
-    4 bits for the operation
+    4 bits for the opcode
    /
   /    11 bits for the first operand (if any)
  /    /           3 bits for the second operand (if any)
