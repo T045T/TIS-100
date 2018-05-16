@@ -305,3 +305,9 @@ Let's go with a pretty easy way:
 This approach allows us to connect the DEN pins of all nodes to a multiplexer and their DATA ports to a single bus.
 
 The interface to the outside world might then be shared memory, with some logic to deal with the resetting, read from the shared memory block and manage the node address (i.e. the input to the DEN mux), incrementing it after reading a VOID instruction or something.
+
+**OH HEY!**
+
+Having a special register that gets incremented every time we add an instruction to the program sure sounds a lot like it might solve our *programLength* problem!
+
+And without any extra hardware effort, to boot!
