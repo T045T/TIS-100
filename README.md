@@ -10,6 +10,15 @@ This requires four main things:
 3. An "assembler" that takes the language accepted by the game and transforms it into actual instructions, ready to transfer to the FPGA
 4. An Overlay package that wraps all this up nicely and allows users to run their own code on their very own, real-world TIS-100
 
+## About this Document
+
+This document is very much a slice of my thought process in attempting this project.
+It is not meant to be a clear cut reference or spec - another document will do that.
+
+Rather, if you read this from top to bottom you'll go through the same rollercoaster of ideas, setbacks and epiphanies as I did thinking this up - with some slight editing, I'll admit.
+
+So, enjoy the ride!
+
 ## System Design
 
 The overall system parameters define the framework for the individual nodes' functionality and inform things like the width and design of data connections and internal buses.
