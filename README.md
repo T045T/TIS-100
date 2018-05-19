@@ -58,11 +58,18 @@ With that decided, let's look at the minimum and maximum numbers our system can 
 > We'll need to keep this in mind when designing the ALU!
 
 Due to the way two's complement numbers work, this means we can nab the block in between those two for our own sordid purposes.
-Since there aren't that many special values, I'll just take the block from `10000000000` to `10000010000` - easy to recognize, and 16 "special" numbers are more than we need!
+Since there aren't that many special values, I'll just take the block from `10000000000` to `10000001111` - easy to recognize, and 16 "special" numbers are more than we need!
 
 > **Architecture Note:**
 >
 > Registers and ports are numbered starting from `10000000000` when expressed as 11-bit numbers.
+
+*Another note:*
+
+*One could also choose to use Binary Coded Decimal (BCD) arithmetic for the TIS-100.
+Signed BCD would only use one more bit than two's complement (4 bits for each decimal place, plus one sign bit) and we could still squeeze in the registers in the space BCD doesn't use.*
+
+*But ultimately, it doesn't make much of a difference, I hope, and two's complement is more familiar (and maybe, better supported by synthesis tools?)*
 
 ### Registers & Ports
 Now, what special numbers might we need?
@@ -114,28 +121,128 @@ for reading, and
 
 for writing.
 
-The READ and WRITE wires are also used to determine whether to continue execution.
+Whoa there.
+
+If you stop and think about it, that means that a T21 node that's sending data to ANY must put it on all 4 of the data buses, but only one neighbor may read it.
+Since the read cannot wait another cycle for handshaking (that would cause the nodes to go out of sync compared to the game), we'll have to do some thinking.
+
+The worst possible case is a `MOV ACC, ANY` instruction at a node N1, followed, a few cycles later (let's say 2), by multiple `ADD ANY` instructions in neighboring nodes N2 and N3.
+In the game, one of those ADDs would finish within one step.
+
+But if we break down what happens in that step, we see that it's impossible to realize that within just one *clock cycle*:
+
+1. N2 and N3 indicate that they want to read something.
+   N1 has already indicated it wants to send something, and they both know this.
+   But crucially, they cannot actually grab the data and continue before clearing up who gets to have it.
+   Remember, only one node can receive an ANY packet.
+2. N1 must decide which of its neighbors gets the data - it's the only node that *can* decide that, because its neighbors don't have a direct connection.
+   N1 must then communicate its decision by pulling low all the WRITE wires for all neighbors that *didn't* get picked.
+
+   Since N2 and N3 are *reading from* ANY, the same thing happens on their other neighbors in parallel.
+3. Finally, each neighbor checks which of its WRITE wires is high, and picks that port, then reads the data from that port and continues.
+
+   It needs to communicate which one it picked back to N1, so N1 can change its WRITE wires again to give the data to another neighbor if needed.
+   This could go back and forth for a while...
+
+   There's a whole addition (including saturation) left to do!
+   Even worse, the instruction could also be a `JRO ANY`, which is an addition that saturates to a dynamic bound.
+   But let's let the ALU worry about that.
+
+That's a lot of communication for a single clock cycle.
+Too much, in fact.
+
+In case you're not familiar with hardware design, your parts usually "wake up" at the time of the rising edge, and any data they output can only safely be assumed to be visible to anyone (including themselves) at the next rising edge.
+
+This behavior is called **clock synchronous**.
+
+Looking at the steps above, we see that there's at least two groups of messages that need to be exchanged between N1 and its neighbors (and that isn't even taking into account adjusting the allocation if one of N1's neighbors gets a better offer!):
+
+![sequential communication between nodes](images/communication.png)
+
+That's three cycles in total (one for each message, and one for the add) - two more than we actually have - and again, that's the easiest possible case for an ANY write with multiple possible targets.
+
+So now what?
+
+Well, we cheat.
+First off, since the clock speed was never going to be very high anyway, we can work at double the clock speed internally by not only updating on the rising clock edge, but the falling one too.
+
+That still leaves us one cycle short though.
+This means we have to cheat even more and use **asynchronous** behavior for setting the READ and WRITE wires.
+That way, we can let analog circuits do the back and forth negotiation of who gets what data.
+
+Asynchronous behavior is kind of tricky to program in VHDL (or in general, really).
+Put very simply, with synchronous behavior, you only have to be convinced that your logic is valid at one particular moment in time: The clock edge.
+You can reasonably assume that all relevant inputs will have sane values at that time.
+
+No such comforts  with asynchronous behavior.
+You need to keep in mind all possible combinations of inputs, and whether they're going to cause a critical error.
+But in this case, we're in luck - the precedence function for who gets to read can be expressed without too much fuss:
+
+```
+TOP_WRITE = TOP_READ
+LEFT_WRITE = NOT(TOP_READ) AND LEFT_READ
+RIGHT_WRITE = NOT(TOP_READ) AND NOT(LEFT_READ) AND RIGHT_READ
+BOTTOM_WRITE = NOT(TOP_READ) AND NOT(LEFT_READ) AND NOT(RIGHT_READ) AND BOTTOM_READ
+```
+
+The equations for the READ wires are similar.
+If we implement this (correctly), then the example from earlier might look something like this on the wires:
+
+![wave forms to illustrate behavior of weak signals](images/waveforms.png)
+
+READ3 and WRITE3 show our asynchronous logic in action:
+WRITE2 and WRITE3 start off high, because N1 is writing to ANY.
+Then WRITE3 is pulled low, because READ2 is high and takes precedence over READ3.
+This in turn causes READ3 to go down with it - N3 is not allowed to read, so it indicates that it won't.
+
+But as soon as READ2 goes low again, both WRITE3 and READ3 go back up.
+Any synchronous logic would only have "seen" the high values of READ2 and READ3 much later and have cost us another cycle!
+
+To isolate all of this asynchronous mess from the main CPU, we'll put it in a dedicated Port Management Unit (PMU). More on that further down this file!
+
+Port read and write operations also act as synchronization points;
+Execution will not continue until they're complete!
 Let's assume that we're able to do a read from or write to a port in one cycle - the manual says timing and performance may vary between hardware, but we'll stick to the reference implementation for the sake of simplicity.
 
-Let's look at an example:
-```
-           +---------------+       +-------+
-READ   +---+               +-------+       +
+Let's look at some examples of that!
+I've simplified the instruction set to READ, WRITE and NOP to make these simpler, so imagine that N1 and N2 are connected by exactly one Port.
 
-                   +-------+       +-------+
-WRITE  +-----------+       +-------+       +
+First up is the simplest case of "READ and WRITE happen at the same time":
 
-           +---+   +---+   +---+   +---+
-CLOCK  +---+   +---+   +---+   +---+   +---+
-           T1      T2      T3      T4
+![Timing diagram for a read and a write operation that start on the same clock cycle](images/simultaneous_rw.png)
 
-```
+Huh? Why does this take two cycles?
+That would be because of the synchronous nature of a CPU - without cheating (and we've decided to confine the cheating to the PMU), we can only see the state of the world at the exact moment of the rising clock edge.
 
-1. At T1, one of the two nodes connected to this port pulls the READ line high.
-2. At T2, the second node writes a piece of data and pulls the WRITE line high.
-3. At T3, the reading node sees the high WRITE line and reads the data. It can then continue to the next instruction.
-   The writing node checks the READ line. It's high, so it knows the data has been read and continues.
-   So the next instructions (another read and write, this time both at the same time!) are executed at T4.
+So that is when N1 and N2 need to decide whether their operations are finished.
+But they can't see yet that the other wants to read/write, respectively.
+That information will only become available with the next rising clock edge.
+When that information does arrive, it's already too late to decide on another instruction, so we're stuck in READ/WRITE for the another cycle.
+
+*... Or at least that would be a sensible explanation. But:*
+
+What if N1 starts writing before N2 starts reading?
+In the game, what happens looks a lot like this:
+
+![Timing diagram for a read and write operation where the read has been delayed by two cycles](images/delayed_write.png)
+
+Upon first glance, this seems reasonable:
+The READ is only one cycle because N1's write has already had time to propagate to N2.
+
+But how does N1 know to stop this fast?!
+The information that N2 is reading should only become known to N1 at the next rising clock edge!
+
+So it turns out that TIS-100 is doing some cheating of its own.
+We'll need those falling-edge "half-cycles" outside of the PMU after all!
+
+At least if we delay the other way around (i.e. WRITE after READ), we get the expected result:
+
+![Timing diagram for a read and a write operation where the write has been delayed for one cycle](images/delayed_read.png)
+
+Just like the first case, except that they finish one cycle later because the WRITE happens later.
+Phew.
+
+One last note:
 
 Given that Port transfers wait for the other side to acknowledge (by pulling either READ or WRITE high), the process will deadlock whenever both sides of a Port try to read or write at the same time.
 The manual says that "a hardware fault will occur", but no such thing happens in the reference implementation.
@@ -297,7 +404,7 @@ Behold!
 18 bits total
 ```
 
-## Loading a program
+### Loading a program
 
 The next question is:
 
@@ -320,3 +427,34 @@ The interface to the outside world might then be shared memory, with some logic 
 Having a special register that gets incremented every time we add an instruction to the program sure sounds a lot like it might solve our *programLength* problem!
 
 And without any extra hardware effort, to boot!
+
+## T21 Internals
+
+Having figured out a rough architecture, let's get more specific:
+
+What components does a T21 node have, and how do they work?
+
+Starting with the obvious, we have at least two parts:
+
+* The **Control Unit (CU)**
+  This manages the Program Counter, fetches and decodes instructions and takes care of jumps
+  (with the exception of relative jumps, which need the EU / ALU to compute the jump target).
+  It also sets the EU's inputs to the correct values.
+* The **Execution Unit (EU)**
+  This does the actualy computation (so, addition and subtraction, in our case).
+
+You might have noticed the frankly careless use of "*the correct values*" up there.
+But seeing as we have Ports to deal with, that won't always be as easy as we'd like.
+So let's add another unit to the mix:
+
+* The **Port Management Unit (PMU)**
+
+  This can be fed a port address (including the two Pseudo-Ports), a READ/WRITE bit and - in case we're writing - some data (DIN).
+  There's also an ENABLE and a RDY wire - but since we decided above that the PMU was going to be *asynchronous*, there's **no** CLOCK input!
+
+  It will do what we tell it to and pull its RDY wire high when it's done.
+  Of course, it will also provide whatever data it has read on DOUT.
+
+  The rest of the T12 node should stall until the PMU has done its work.
+
+
