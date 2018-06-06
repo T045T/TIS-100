@@ -121,6 +121,8 @@ for reading, and
 
 for writing.
 
+Also, it turns out that when an ANY write only has ANY reads to pick from
+
 Whoa there.
 
 If you stop and think about it, that means that a T21 node that's sending data to ANY must put it on all 4 of the data buses, but only one neighbor may read it.
@@ -151,7 +153,7 @@ But if we break down what happens in that step, we see that it's impossible to r
 That's a lot of communication for a single clock cycle.
 Too much, in fact.
 
-In case you're not familiar with hardware design, your parts usually "wake up" at the time of the rising edge, and any data they output can only safely be assumed to be visible to anyone (including themselves) at the next rising edge.
+In case you're not familiar with hardware design, parts usually only check their inputs at the time of the rising edge, and any data they output can only safely be assumed to be visible to anyone (including themselves) at the next rising edge.
 
 This behavior is called **clock synchronous**.
 
@@ -197,6 +199,37 @@ This in turn causes READ3 to go down with it - N3 is not allowed to read, so it 
 
 But as soon as READ2 goes low again, both WRITE3 and READ3 go back up.
 Any synchronous logic would only have "seen" the high values of READ2 and READ3 much later and have cost us another cycle!
+
+\*Record scratch sound\*
+
+Well, that was a fun little excursion, but it turns out asynchronous logic actually isn't the solution here.
+
+Even if I took the time to figure out everything, then asynchronous logic would still be sensitive to minute time differences.
+That is, the first node to pull a READ wire high would get the WRITE, not the one that *should* get it according to the precedence list.
+
+So, we'll have to abandon the notion that one "step" in the game corresponds to one cycle in our hardware implementation.
+Too bad :(
+
+Instead, we will have to model all the communication explicitly, using rules that generate the behavior we want using just the local knowledge a node has.
+
+I programmed a simulation in Clojure to test some of those rules (turns out this is essentially a cellular automaton, but that's not important here).
+Here's the set of rules I came up with:
+
+1. At the start of each step, all nodes initialize a boolean variable that tells them if it's their "turn" to update.
+This is TRUE initially for reading nodes, and FALSE for writing ones.
+2. All nodes that want to either read from or write to ANY (depending on whether it's been an even or odd number of cycles since the start) follow this rule:
+
+    * If any neighbors have their wires high, check the precedence function and confirm the highest priority one by pulling our wire high.
+    * If no neighbors have their wires high, pull *all* of ours high.
+3. This goes on until two succeeding steps have made no changes to the configuration of the READ and WRITE wires, **globally*.
+
+That third step poses a problem.
+I just mentioned that we want to only use node local knowledge.
+Well, we can't, in this case.
+So we'll add another wire and call it "PORTS_SETTLED".
+It will rest at 0, but any node can pull it to 1.
+Now all the nodes can check its value and know that the port negotiation phase is done when it's finally 0.
+Nodes that do not use ports or read to/write from a fixed one can simply leave it alone, and the ANY nodes pull it high until they have observed the same values on their READ/WRITE wires for three cycles (three because reading and writing nodes take turns updating).
 
 To isolate all of this asynchronous mess from the main CPU, we'll put it in a dedicated Port Management Unit (PMU). More on that further down this file!
 
@@ -248,7 +281,7 @@ Given that Port transfers wait for the other side to acknowledge (by pulling eit
 The manual says that "a hardware fault will occur", but no such thing happens in the reference implementation.
 The two nodes will simply wait forever.
 
-Given that potential to deadlock, a RESET pin is crucial for the VHDL implementation!
+Especially with that potential to deadlock, a RESET pin is crucial for the VHDL implementation!
 
 > **Architecture Note:**
 >
@@ -296,12 +329,12 @@ Let's break it down into categories:
 
   Add the operand to ACC.
   Again, when reading from a Port, this may block.
-  ACC saturates at 999.
+  ACC saturates at 999 (or -999 if adding a negative number, which is possible).
 
 * **SUB** src: {literal, port, ACC, NIL}
 
   Subtract the operand from ACC (will block if reading from a Port).
-  ACC saturates at -999.
+  ACC saturates at -999 (or 999 if subtracting a negative number, as above).
 
 * **NEG**
 
