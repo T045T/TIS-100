@@ -200,7 +200,7 @@ This in turn causes READ3 to go down with it - N3 is not allowed to read, so it 
 But as soon as READ2 goes low again, both WRITE3 and READ3 go back up.
 Any synchronous logic would only have "seen" the high values of READ2 and READ3 much later and have cost us another cycle!
 
-\*Record scratch sound\*
+__\*Record scratch sound\*__
 
 Well, that was a fun little excursion, but it turns out asynchronous logic actually isn't the solution here.
 
@@ -221,7 +221,7 @@ This is TRUE initially for reading nodes, and FALSE for writing ones.
 
     * If any neighbors have their wires high, check the precedence function and confirm the highest priority one by pulling our wire high.
     * If no neighbors have their wires high, pull *all* of ours high.
-3. This goes on until two succeeding steps have made no changes to the configuration of the READ and WRITE wires, **globally*.
+3. This goes on until two succeeding steps have made no changes to the configuration of the READ and WRITE wires, **globally**.
 
 That third step poses a problem.
 I just mentioned that we want to only use node local knowledge.
